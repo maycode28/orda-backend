@@ -41,6 +41,7 @@ def main() -> None:
 
     print("\n[feature 요약]")
     total = len(final_dataset["features"])
+    source_gpx_count = sum(1 for f in final_dataset["features"] if f["properties"].get("source_gpx"))
     surface_count = sum(1 for f in final_dataset["features"] if f["properties"].get("surface"))
     summit_count = sum(1 for f in final_dataset["features"] if f["properties"].get("nearest_summit_id"))
     qa_pass = sum(1 for f in final_dataset["features"] if f["properties"].get("qa_status") == "pass")
@@ -52,6 +53,7 @@ def main() -> None:
         difficulty_counts[d] = difficulty_counts.get(d, 0) + 1
 
     print(f"  총 feature: {total}개")
+    print(f"  source_gpx 있음: {source_gpx_count}개 / 없음: {total - source_gpx_count}개")
     print(f"  surface 있음: {surface_count}개 / 없음: {total - surface_count}개")
     print(f"  nearest_summit 연결됨: {summit_count}개")
     print(f"  qa_status pass: {qa_pass}개 / fail: {qa_fail}개")
@@ -62,6 +64,7 @@ def main() -> None:
         props = feat["properties"]
         print(
             f"  {props['edge_id']}"
+            f" | source_gpx: {props.get('source_gpx')}"
             f" | elev: {props['elevation_start_m']} → {props['elevation_end_m']}"
             f" | diff: {props['elevation_diff_m']}"
             f" | slope: {props['slope_percent']}%"

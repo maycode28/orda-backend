@@ -24,6 +24,7 @@ CREATE INDEX idx_trail_nodes_geom ON trail_nodes USING GIST (geom);
 CREATE TABLE trail_edges
 (
     edge_id           TEXT PRIMARY KEY,
+    source_gpx        TEXT,
     start_node_id     TEXT NOT NULL REFERENCES trail_nodes (node_id),
     end_node_id       TEXT NOT NULL REFERENCES trail_nodes (node_id),
     distance_m        DOUBLE PRECISION,
@@ -39,6 +40,7 @@ CREATE TABLE trail_edges
     geom              GEOMETRY(LineString, 4326)
 );
 CREATE INDEX idx_trail_edges_geom ON trail_edges USING GIST (geom);
+CREATE INDEX idx_trail_edges_source_gpx ON trail_edges (source_gpx);
 
 CREATE TABLE summit_points
 (

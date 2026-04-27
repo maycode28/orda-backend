@@ -27,11 +27,17 @@ CREATE INDEX idx_trail_nodes_geom ON trail_nodes USING GIST (geom);
 -- trail_edges
 -- 원본: final_trail_dataset.geojson
 --
--- elevation_diff_m: 현재는 end-start 단순 차이값.
---   진짜 누적 상승고도(gain/loss)는 edge 내부 샘플링 구현 후 컬럼 추가 예정.
+-- source_gpx:
+--   GPX 파일 단위 코스 식별자.
+--   추천 기능에서 같은 GPX에서 나온 edge들을 하나의 코스로 묶는 기준으로 사용.
+--
+-- elevation_diff_m:
+--   현재는 end-start 단순 차이값.
+--   진짜 누적 상승고도(gain/loss)는 edge 내부 샘플링 구현 후 컬럼 확장 예정.
 -- ──────────────────────────────────────────────
 CREATE TABLE trail_edges (
                              edge_id           TEXT PRIMARY KEY,
+                             source_gpx        TEXT,
                              start_node_id     TEXT NOT NULL REFERENCES trail_nodes(node_id),
                              end_node_id       TEXT NOT NULL REFERENCES trail_nodes(node_id),
                              distance_m        DOUBLE PRECISION,
@@ -48,6 +54,9 @@ CREATE TABLE trail_edges (
 );
 
 CREATE INDEX idx_trail_edges_geom ON trail_edges USING GIST (geom);
+CREATE INDEX idx_trail_edges_source_gpx ON trail_edges (source_gpx);
+CREATE INDEX idx_trail_edges_nearest_summit_id ON trail_edges (nearest_summit_id);
+CREATE INDEX idx_trail_edges_difficulty ON trail_edges (difficulty);
 
 -- ──────────────────────────────────────────────
 -- summit_points

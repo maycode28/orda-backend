@@ -55,6 +55,20 @@ def read_geojson_features(path: Path) -> list[dict[str, Any]]:
     return features
 
 
+def save_geojson(path: Path, data: dict[str, Any]) -> None:
+    if not isinstance(data, dict):
+        raise ValueError("저장할 데이터가 dict가 아닙니다.")
+
+    if data.get("type") != "FeatureCollection":
+        raise ValueError("저장할 데이터가 FeatureCollection이 아닙니다.")
+
+    features = data.get("features")
+    if not isinstance(features, list):
+        raise ValueError("저장할 데이터의 features가 list가 아닙니다.")
+
+    write_json_file(path, data)
+
+
 # ──────────────────────────────────────────────
 # DEM 관련 함수
 # ──────────────────────────────────────────────
@@ -231,16 +245,16 @@ def build_summit_kdtree(
     if not summit_list:
         return None
 
-    R = 6371000.0
+    radius_m = 6371000.0
     coords = []
     ids = []
 
     for summit in summit_list:
         lat_rad = math.radians(summit["lat"])
         lng_rad = math.radians(summit["lng"])
-        x = R * math.cos(lat_rad) * math.cos(lng_rad)
-        y = R * math.cos(lat_rad) * math.sin(lng_rad)
-        z = R * math.sin(lat_rad)
+        x = radius_m * math.cos(lat_rad) * math.cos(lng_rad)
+        y = radius_m * math.cos(lat_rad) * math.sin(lng_rad)
+        z = radius_m * math.sin(lat_rad)
         coords.append([x, y, z])
         ids.append(summit["summit_id"])
 
@@ -260,12 +274,12 @@ def find_nearest_summit_id_kdtree(
     """
     tree, ids = summit_kdtree
 
-    R = 6371000.0
+    radius_m = 6371000.0
     lat_rad = math.radians(midpoint_lat)
     lng_rad = math.radians(midpoint_lng)
-    x = R * math.cos(lat_rad) * math.cos(lng_rad)
-    y = R * math.cos(lat_rad) * math.sin(lng_rad)
-    z = R * math.sin(lat_rad)
+    x = radius_m * math.cos(lat_rad) * math.cos(lng_rad)
+    y = radius_m * math.cos(lat_rad) * math.sin(lng_rad)
+    z = radius_m * math.sin(lat_rad)
 
     dist, idx = tree.query([x, y, z])
 
@@ -333,10 +347,10 @@ def haversine_distance_m(
         lat2: float,
 ) -> float:
     """
-    두 좌표 사이의 거리를 미터 단위로 계산한다 (Haversine 공식).
-    입력은 [lng, lat] 순서 (도 단위).
+    두 좌표 사이의 거리를 미터 단위로 계산한다.
+    입력은 [lng, lat] 순서.
     """
-    R = 6371000.0
+    radius_m = 6371000.0
 
     lat1_rad = math.radians(lat1)
     lat2_rad = math.radians(lat2)
@@ -350,7 +364,7 @@ def haversine_distance_m(
     )
     c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
-    return R * c
+    return radius_m * c
 
 
 # ──────────────────────────────────────────────
@@ -375,26 +389,26 @@ def get_edge_midpoint(geometry: dict[str, Any]) -> Optional[tuple[float, float]]
 
     segment_lengths: list[float] = []
     for i in range(len(coords) - 1):
-        d = haversine_distance_m(
+        distance_m = haversine_distance_m(
             coords[i][0], coords[i][1],
             coords[i + 1][0], coords[i + 1][1],
         )
-        segment_lengths.append(d)
+        segment_lengths.append(distance_m)
 
     total_length = sum(segment_lengths)
     half_length = total_length / 2
 
     cumulative = 0.0
-    for i, seg_len in enumerate(segment_lengths):
-        if cumulative + seg_len >= half_length:
+    for i, segment_length in enumerate(segment_lengths):
+        if cumulative + segment_length >= half_length:
             remaining = half_length - cumulative
-            ratio = remaining / seg_len if seg_len > 0 else 0
+            ratio = remaining / segment_length if segment_length > 0 else 0
             lng = coords[i][0] + ratio * (coords[i + 1][0] - coords[i][0])
             lat = coords[i][1] + ratio * (coords[i + 1][1] - coords[i][1])
-            return (lng, lat)
-        cumulative += seg_len
+            return lng, lat
+        cumulative += segment_length
 
-    return (coords[-1][0], coords[-1][1])
+    return coords[-1][0], coords[-1][1]
 
 
 # ──────────────────────────────────────────────
@@ -620,18 +634,15 @@ def build_edge_metrics(
     2. A단계 공공 등산로의 trail_id 기준 surface (fallback)
     매핑 실패 또는 값 없음이면 surface는 None 유지.
 
-    로직:
-    1. start_node_id, end_node_id로 node 고도를 lookup
-    2. elevation_diff_m = end - start (부호 있는 고도 차이)
-    3. slope_percent = (elevation_diff_m / distance_m) * 100
-    4. difficulty_score = 4변수 가중합 (slope/elevation/distance/terrain)
-    5. difficulty = easy/moderate/hard/very_hard/extreme
-    6. B단계 surface 우선, 없으면 A단계 trail_id 기준 조회
+    source_gpx:
+    B단계 edge properties에서 받은 GPX 파일명.
+    코스 단위 추천을 위해 final_trail_dataset.geojson까지 보존한다.
     """
     properties = edge_feature.get("properties", {})
 
     edge_id = properties.get("edge_id")
     trail_id = properties.get("trail_id")
+    source_gpx = properties.get("source_gpx")
     start_node_id = properties.get("start_node_id")
     end_node_id = properties.get("end_node_id")
     distance_m = properties.get("distance_m")
@@ -644,7 +655,6 @@ def build_edge_metrics(
 
     elevation_diff_m: Optional[float] = None
     slope_percent: Optional[float] = None
-    difficulty: Optional[str] = None
 
     if (
             elevation_start_m is not None
@@ -661,7 +671,10 @@ def build_edge_metrics(
     surface = properties.get("surface") or public_surface_map.get(trail_id)
 
     difficulty_score = calculate_difficulty_score(
-        slope_percent, elevation_diff_m, distance_m, surface,
+        slope_percent,
+        elevation_diff_m,
+        distance_m,
+        surface,
         max_slope=max_slope,
         max_elevation=max_elevation,
         max_distance=max_distance,
@@ -671,6 +684,7 @@ def build_edge_metrics(
     return {
         "edge_id": edge_id,
         "trail_id": trail_id,
+        "source_gpx": source_gpx,
         "start_node_id": start_node_id,
         "end_node_id": end_node_id,
         "distance_m": distance_m,
@@ -698,7 +712,7 @@ def build_final_trail_feature(
     문서 기준 final_trail_dataset.geojson의 feature 하나를 생성한다.
 
     필드 순서:
-    edge_id, start_node_id, end_node_id, distance_m,
+    edge_id, source_gpx, start_node_id, end_node_id, distance_m,
     elevation_start_m, elevation_end_m, elevation_diff_m,
     slope_percent, difficulty_score, difficulty, surface, nearest_summit_id, qa_status,
     geometry
@@ -707,6 +721,7 @@ def build_final_trail_feature(
 
     properties = {
         "edge_id": edge_metrics["edge_id"],
+        "source_gpx": edge_metrics["source_gpx"],
         "start_node_id": edge_metrics["start_node_id"],
         "end_node_id": edge_metrics["end_node_id"],
         "distance_m": edge_metrics["distance_m"],
@@ -746,9 +761,10 @@ def build_final_trail_dataset(
     각 edge마다:
     1. node_elev_index에서 고도 참조 → diff/slope/difficulty_score/difficulty 계산
     2. B단계 surface 우선, A단계 fallback
-    3. KDTree 기반 nearest_summit_id 계산 (300m 이내)
-    4. qa_rules로 qa_status 계산
-    5. 최종 feature 생성
+    3. B단계 source_gpx 보존
+    4. KDTree 기반 nearest_summit_id 계산
+    5. qa_rules로 qa_status 계산
+    6. 최종 feature 생성
     """
     from qa_rules import evaluate_edge_qa
 
@@ -827,21 +843,3 @@ def build_final_trail_dataset(
         "type": "FeatureCollection",
         "features": final_features,
     }
-
-
-# ──────────────────────────────────────────────
-# 저장
-# ──────────────────────────────────────────────
-
-def save_geojson(path: Path, data: dict[str, Any]) -> None:
-    if not isinstance(data, dict):
-        raise ValueError("저장할 데이터가 dict가 아닙니다.")
-
-    if data.get("type") != "FeatureCollection":
-        raise ValueError("저장할 데이터가 FeatureCollection이 아닙니다.")
-
-    features = data.get("features")
-    if not isinstance(features, list):
-        raise ValueError("저장할 데이터의 features가 list가 아닙니다.")
-
-    write_json_file(path, data)

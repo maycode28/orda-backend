@@ -246,7 +246,8 @@ def load_edges(cursor, features: list[dict[str, Any]]) -> int:
     """final_trail_dataset.geojson → trail_edges 테이블에 배치 적재 시도한다."""
     sql = """
           INSERT INTO trail_edges (
-              edge_id, start_node_id, end_node_id,
+              edge_id, source_gpx,
+              start_node_id, end_node_id,
               distance_m, elevation_start_m, elevation_end_m,
               elevation_diff_m, slope_percent, difficulty_score, difficulty,
               surface, nearest_summit_id, qa_status,
@@ -256,7 +257,7 @@ def load_edges(cursor, features: list[dict[str, Any]]) -> int:
           """
 
     template = (
-        f"(%(edge_id)s, %(start_node_id)s, %(end_node_id)s, "
+        f"(%(edge_id)s, %(source_gpx)s, %(start_node_id)s, %(end_node_id)s, "
         f"%(distance_m)s, %(elevation_start_m)s, %(elevation_end_m)s, "
         f"%(elevation_diff_m)s, %(slope_percent)s, %(difficulty_score)s, %(difficulty)s, "
         f"%(surface)s, %(nearest_summit_id)s, %(qa_status)s, "
@@ -276,6 +277,7 @@ def load_edges(cursor, features: list[dict[str, Any]]) -> int:
         rows.append(
             {
                 "edge_id": props.get("edge_id"),
+                "source_gpx": props.get("source_gpx"),
                 "start_node_id": props.get("start_node_id"),
                 "end_node_id": props.get("end_node_id"),
                 "distance_m": props.get("distance_m"),
@@ -361,6 +363,48 @@ def verify_spatial(cursor) -> None:
     print(f"  edge → node 참조 실패: {orphan}개")
 
 
+def verify_source_gpx(cursor) -> None:
+    """추천 기능에 필요한 source_gpx 적재 상태를 확인한다."""
+    print("\n[GPX 출처 검증]")
+
+    cursor.execute("SELECT COUNT(*) FROM trail_edges")
+    total = cursor.fetchone()[0]
+
+    cursor.execute("""
+                   SELECT COUNT(*)
+                   FROM trail_edges
+                   WHERE source_gpx IS NOT NULL
+                     AND source_gpx <> ''
+                   """)
+    with_source_gpx = cursor.fetchone()[0]
+
+    cursor.execute("""
+                   SELECT COUNT(DISTINCT source_gpx)
+                   FROM trail_edges
+                   WHERE source_gpx IS NOT NULL
+                     AND source_gpx <> ''
+                   """)
+    distinct_source_gpx = cursor.fetchone()[0]
+
+    print(f"  source_gpx 있음: {with_source_gpx}개 / 없음: {total - with_source_gpx}개")
+    print(f"  distinct source_gpx: {distinct_source_gpx}개")
+
+    cursor.execute("""
+                   SELECT source_gpx, COUNT(*) AS edge_count
+                   FROM trail_edges
+                   WHERE source_gpx IS NOT NULL
+                     AND source_gpx <> ''
+                   GROUP BY source_gpx
+                   ORDER BY edge_count DESC, source_gpx
+                       LIMIT 5
+                   """)
+    rows = cursor.fetchall()
+
+    print("  source_gpx 샘플:")
+    for source_gpx, edge_count in rows:
+        print(f"    - {source_gpx}: {edge_count}개 edge")
+
+
 # ──────────────────────────────────────────────
 # 메인
 # ──────────────────────────────────────────────
@@ -403,6 +447,7 @@ def main() -> None:
 
         verify_counts(cursor)
         verify_spatial(cursor)
+        verify_source_gpx(cursor)
 
         conn.commit()
         print("\n[완료] 적재 성공, 커밋됨")
