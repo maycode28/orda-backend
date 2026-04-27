@@ -15,6 +15,9 @@ public class TrailEdge {
     @Column(name = "edge_id", nullable = false)
     private String edgeId;
 
+    @Column(name = "source_gpx")
+    private String sourceGpx;
+
     @Column(name = "start_node_id", nullable = false)
     private String startNodeId;
 
