@@ -15,6 +15,7 @@ import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 
@@ -48,12 +49,27 @@ public class RecommendationService {
         int normalizedTopN = Math.max(1, Math.min(topN, 20));
 
         try {
+            if (!hasEnoughHistoryForPersonalization(userId)) {
+                return new RecommendationListResponse(loadFallbackRecommendations(Math.min(normalizedTopN, 3)));
+            }
+
             List<RecommendationItemResponse> recommendations = runPython(userId, normalizedTopN);
             return new RecommendationListResponse(recommendations);
         } catch (Exception e) {
             log.warn("추천 ML 스크립트 실패 - fallback 추천 반환. userId={}, topN={}", userId, normalizedTopN, e);
             return new RecommendationListResponse(loadFallbackRecommendations(Math.min(normalizedTopN, 3)));
         }
+    }
+
+    private boolean hasEnoughHistoryForPersonalization(Long userId) {
+        String sql = """
+                SELECT COUNT(*)
+                FROM hiking_sessions
+                WHERE user_id = ?
+                  AND status = 'COMPLETED'
+                """;
+        Integer count = jdbcTemplate.queryForObject(sql, Integer.class, userId);
+        return count != null && count >= 3;
     }
 
     private List<RecommendationItemResponse> runPython(Long userId, int topN) throws Exception {
@@ -107,11 +123,11 @@ public class RecommendationService {
 
     private List<RecommendationItemResponse> loadFallbackRecommendations(int topN) {
         try {
-            List<RecommendationItemResponse> monthlyPopular = loadMonthlyPopularRecommendations(topN);
-            if (!monthlyPopular.isEmpty()) {
-                return monthlyPopular;
+            List<RecommendationItemResponse> recommendations = loadMonthlyPopularRecommendations(topN);
+            if (recommendations.size() < topN) {
+                recommendations = fillWithCourseCatalogFallback(recommendations, topN);
             }
-            return loadCourseCatalogFallback(topN);
+            return recommendations;
         } catch (DataAccessException e) {
             log.warn("추천 fallback 조회 실패 - 빈 추천 반환. topN={}", topN, e);
             return List.of();
@@ -126,11 +142,17 @@ public class RecommendationService {
                         COALESCE(NULLIF(regexp_replace(e.source_gpx, '\\.gpx$', '', 'i'), ''), e.source_gpx) AS name,
                         COALESCE(SUM(e.distance_m), 0) / 1000.0 AS distance_km,
                         COALESCE(SUM(GREATEST(COALESCE(e.elevation_diff_m, 0), 0)), 0) AS elevation_gain_m,
-                        COALESCE(
-                            SUM(COALESCE(e.difficulty_score, 0) * COALESCE(NULLIF(e.distance_m, 0), 1))
-                            / NULLIF(SUM(COALESCE(NULLIF(e.distance_m, 0), 1)), 0),
-                            AVG(e.difficulty_score),
-                            0
+                        LEAST(
+                            5.0,
+                            GREATEST(
+                                1.0,
+                                1.0 + COALESCE(
+                                    SUM(COALESCE(e.difficulty_score, 0) * COALESCE(NULLIF(e.distance_m, 0), 1))
+                                    / NULLIF(SUM(COALESCE(NULLIF(e.distance_m, 0), 1)), 0),
+                                    AVG(e.difficulty_score),
+                                    0
+                                ) / 25.0
+                            )
                         ) AS difficulty_score
                     FROM trail_edges e
                     WHERE e.source_gpx IS NOT NULL
@@ -217,31 +239,70 @@ public class RecommendationService {
         return mapRecommendationRows(sql, topN);
     }
 
-    private List<RecommendationItemResponse> loadCourseCatalogFallback(int topN) {
+    private List<RecommendationItemResponse> fillWithCourseCatalogFallback(
+            List<RecommendationItemResponse> base,
+            int topN
+    ) {
+        if (base.size() >= topN) {
+            return base;
+        }
+
+        List<String> excludedTrailIds = base.stream()
+                .map(RecommendationItemResponse::trailId)
+                .toList();
+
+        List<RecommendationItemResponse> fillers = loadCourseCatalogFallback(topN - base.size(), excludedTrailIds);
+        return java.util.stream.Stream.concat(base.stream(), fillers.stream()).toList();
+    }
+
+    private List<RecommendationItemResponse> loadCourseCatalogFallback(int topN, List<String> excludedTrailIds) {
+        List<Object> params = new ArrayList<>();
+        String excludedCondition = "";
+        if (!excludedTrailIds.isEmpty()) {
+            String placeholders = String.join(",", java.util.Collections.nCopies(excludedTrailIds.size(), "?"));
+            excludedCondition = "AND e.source_gpx NOT IN (" + placeholders + ")";
+            params.addAll(excludedTrailIds);
+        }
+
         String sql = """
                 SELECT
                     e.source_gpx AS trail_id,
                     COALESCE(NULLIF(regexp_replace(e.source_gpx, '\\.gpx$', '', 'i'), ''), e.source_gpx) AS name,
                     COALESCE(SUM(e.distance_m), 0) / 1000.0 AS distance_km,
                     COALESCE(SUM(GREATEST(COALESCE(e.elevation_diff_m, 0), 0)), 0) AS elevation_gain_m,
-                    COALESCE(
-                        SUM(COALESCE(e.difficulty_score, 0) * COALESCE(NULLIF(e.distance_m, 0), 1))
-                        / NULLIF(SUM(COALESCE(NULLIF(e.distance_m, 0), 1)), 0),
-                        AVG(e.difficulty_score),
-                        0
+                    LEAST(
+                        5.0,
+                        GREATEST(
+                            1.0,
+                            1.0 + COALESCE(
+                                SUM(COALESCE(e.difficulty_score, 0) * COALESCE(NULLIF(e.distance_m, 0), 1))
+                                / NULLIF(SUM(COALESCE(NULLIF(e.distance_m, 0), 1)), 0),
+                                AVG(e.difficulty_score),
+                                0
+                            ) / 25.0
+                        )
                     ) AS difficulty_score,
                     COUNT(*) AS edge_count
                 FROM trail_edges e
                 WHERE e.source_gpx IS NOT NULL
                   AND e.source_gpx <> ''
                   AND e.distance_m IS NOT NULL
+                  %s
                 GROUP BY e.source_gpx
                 HAVING SUM(e.distance_m) > 0
                 ORDER BY edge_count DESC, distance_km DESC, difficulty_score DESC, trail_id
                 LIMIT ?
-                """;
+                """.formatted(excludedCondition);
 
-        return mapRecommendationRows(sql, topN);
+        params.add(topN);
+        return jdbcTemplate.query(sql, (rs, rowNum) -> new RecommendationItemResponse(
+                rs.getString("trail_id"),
+                rs.getString("name"),
+                rs.getDouble("distance_km"),
+                rs.getDouble("elevation_gain_m"),
+                rs.getDouble("difficulty_score"),
+                0.0
+        ), params.toArray());
     }
 
     private List<RecommendationItemResponse> mapRecommendationRows(String sql, int topN) {

@@ -75,6 +75,23 @@ def _course_name_expr() -> str:
     """
 
 
+def _difficulty_score_expr() -> str:
+    return """
+        LEAST(
+            5.0,
+            GREATEST(
+                1.0,
+                1.0 + COALESCE(
+                    SUM(COALESCE(e.difficulty_score, 0) * COALESCE(NULLIF(e.distance_m, 0), 1))
+                    / NULLIF(SUM(COALESCE(NULLIF(e.distance_m, 0), 1)), 0),
+                    AVG(e.difficulty_score),
+                    0
+                ) / 25.0
+            )
+        )
+    """
+
+
 def _load_course_features(conn) -> pd.DataFrame:
     sql = f"""
         SELECT
@@ -82,12 +99,7 @@ def _load_course_features(conn) -> pd.DataFrame:
             {_course_name_expr()} AS name,
             COALESCE(SUM(e.distance_m), 0) / 1000.0 AS distance_km,
             COALESCE(SUM(GREATEST(COALESCE(e.elevation_diff_m, 0), 0)), 0) AS elevation_gain_m,
-            COALESCE(
-                SUM(COALESCE(e.difficulty_score, 0) * COALESCE(NULLIF(e.distance_m, 0), 1))
-                / NULLIF(SUM(COALESCE(NULLIF(e.distance_m, 0), 1)), 0),
-                AVG(e.difficulty_score),
-                0
-            ) AS difficulty_score,
+            {_difficulty_score_expr()} AS difficulty_score,
             COUNT(*) AS edge_count
         FROM trail_edges e
         WHERE e.source_gpx IS NOT NULL
@@ -173,12 +185,7 @@ def _load_monthly_popular_courses(conn) -> pd.DataFrame:
                 {_course_name_expr()} AS name,
                 COALESCE(SUM(e.distance_m), 0) / 1000.0 AS distance_km,
                 COALESCE(SUM(GREATEST(COALESCE(e.elevation_diff_m, 0), 0)), 0) AS elevation_gain_m,
-                COALESCE(
-                    SUM(COALESCE(e.difficulty_score, 0) * COALESCE(NULLIF(e.distance_m, 0), 1))
-                    / NULLIF(SUM(COALESCE(NULLIF(e.distance_m, 0), 1)), 0),
-                    AVG(e.difficulty_score),
-                    0
-                ) AS difficulty_score,
+                {_difficulty_score_expr()} AS difficulty_score,
                 COUNT(*) AS edge_count
             FROM trail_edges e
             WHERE e.source_gpx IS NOT NULL
@@ -267,6 +274,10 @@ def _fallback_courses(courses: pd.DataFrame, top_n: int) -> list[Recommendation]
         ascending=[False, False, False, True],
     ).head(top_n)
 
+    return _recommendations_from_rows(ranked)
+
+
+def _recommendations_from_rows(rows: pd.DataFrame) -> list[Recommendation]:
     return [
         Recommendation(
             trail_id=str(row.trail_id),
@@ -276,7 +287,7 @@ def _fallback_courses(courses: pd.DataFrame, top_n: int) -> list[Recommendation]
             difficulty_score=float(row.difficulty_score),
             similarity_score=0.0,
         )
-        for row in ranked.itertuples(index=False)
+        for row in rows.itertuples(index=False)
     ]
 
 
@@ -285,9 +296,19 @@ def _popular_or_fallback_courses(
     courses: pd.DataFrame,
     top_n: int,
 ) -> list[Recommendation]:
+    limit = min(top_n, 3)
     monthly_popular = _load_monthly_popular_courses(conn)
-    source = monthly_popular if not monthly_popular.empty else courses
-    return _fallback_courses(source, min(top_n, 3))
+    if monthly_popular.empty:
+        return _fallback_courses(courses, limit)
+
+    ranked = monthly_popular.head(limit)
+    if len(ranked) < limit:
+        used = set(ranked["trail_id"].astype(str))
+        fillers = courses[~courses["trail_id"].astype(str).isin(used)]
+        filler_recommendations = _fallback_courses(fillers, limit - len(ranked))
+        return _recommendations_from_rows(ranked) + filler_recommendations
+
+    return _recommendations_from_rows(ranked)
 
 
 def _build_preference_vector(history: pd.DataFrame) -> pd.Series | None:
